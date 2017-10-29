@@ -1,0 +1,263 @@
+---
+title: "Supplemerntary Information"
+author: "S.H Wessels"
+date: "October 10, 2017"
+output:
+  html_document: default
+  pdf_document: default
+  theme: journal
+---
+
+ R Analysis
+---
+---
+```{r load packages in background, message=FALSE, include=FALSE}
+#load packages in packground
+setwd("C:/Users/stephan123/Desktop/DESeq2")
+library(knitr)
+library(DESeq2)
+library(readr)
+library(biomaRt)
+library(RColorBrewer)
+library(pheatmap)
+library(ggplot2)
+library(devtools)
+library(enrichR)
+library(data.table)
+library(ggrepel)
+```
+---
+---
+##
+<h2>Construct countmatrix</h2>
+---
+```{r countmatrix, echo=TRUE, message=FALSE}
+# load DESeq2 package
+library(DESeq2)
+dir <- "C:/Users/stephan123/Desktop/DESeq2"
+
+# create countMatrix (DESeq2 input file) 
+
+HTseqFiles<- grep('ARM',list.files(dir), value = TRUE)
+
+HTseqAGE= c("48","54","48","52","49","55","58","46","64","29","33","31","34")
+
+HTseqGender= c("F","F","F","F","F","F","F","F","M","F","M","M","M")
+
+HTseqConditions<- c(rep("diseased",9),rep("healthy",4))
+
+HTseqNAMES <- c("P1","P2","P3","P4","P5","P6","P7","P8","P9","C1","C2","C6","C7")
+
+HTseqTable<- data.frame(sampleNames=HTseqNAMES,fileName=HTseqFiles,condition=HTseqConditions,age=HTseqAGE,gender=HTseqGender)
+
+# subset the the data frame to exclude samples.
+HTseqTable <- subset(HTseqTable, ! HTseqTable$fileName %in% c("CASE_09_ARM.txt","CTRL_01_ARM.txt","CASE_01_ARM.txt"))
+
+#create DESeq dataset.
+ddsHTSeq <- DESeqDataSetFromHTSeqCount(sampleTable = HTseqTable,directory = dir,design = ~ condition)
+
+kable(HTseqTable, row.names = FALSE,caption = "Table 1: count matrix of sampless in analysis")
+
+
+```
+---
+##
+<h2>Annotation of genes in dataset against Ensembl database</h2>
+---
+```{r Annotation, echo=TRUE, message=FALSE}
+# load biomart package
+library(biomaRt)
+
+# set annotation paramaters
+genes <- rownames(ddsHTSeq)
+ensembl=useMart("ensembl")
+ensembl=useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+
+# annotate genes.
+geneBiotype <- getBM(attributes = c('ensembl_gene_id','gene_biotype','description','hgnc_symbol'),filters = 'ensembl_gene_id',values = genes,mart = ensembl,verbose = FALSE)
+
+geneBiotype$description <- lapply(geneBiotype$description, function(x) gsub(" \\[.*","",x))
+
+#subset annotated genes by long intergenic non-coding RNA
+geneBiotype_sub <- subset(geneBiotype, geneBiotype$gene_biotype == 'lincRNA')
+
+# subset the DESeq2 data set by the extracted gene information
+ddsHTSeq <- subset(ddsHTSeq, rownames(ddsHTSeq) %in% geneBiotype_sub$ensembl_gene_id)
+
+head(geneBiotype)
+head(geneBiotype_sub)
+
+```
+---
+---
+##
+<h2>DESeq2 differential expression analysis</h2>
+---
+```{r DESeq2 expression, echo=TRUE, message=FALSE}
+# DESeq2 filter and reference
+ddsHTSeq<- ddsHTSeq[rowSums(counts(ddsHTSeq))>1,]
+
+ddsHTSeq$condition <- relevel(ddsHTSeq$condition, ref='healthy')
+
+#DESeq2 analysis
+ddsHTSeq_expres <- DESeq(ddsHTSeq)
+
+res<- results(ddsHTSeq_expres, alpha = 0.05)
+
+summary(res)
+```
+---
+---
+##
+<h2>Rlog and Distance matrix</h2>
+---
+```{r RLOG, echo=TRUE, message=FALSE,fig.height= 12,fig.width= 10}
+# RLog analysis
+Rlog_HTSeq<- rlog(ddsHTSeq_expres, blind = FALSE)
+
+head(assay(Rlog_HTSeq))
+
+# distance matrix
+HTSeq_Distance <- dist(t(assay(Rlog_HTSeq)))
+HTSeq_distmatrix <- as.matrix(HTSeq_Distance) 
+
+rownames(HTSeq_distmatrix) <- paste(Rlog_HTSeq$sampleNames,Rlog_HTSeq$gender,  Rlog_HTSeq$age, Rlog_HTSeq$condition, sep = " | ") 
+colnames(HTSeq_distmatrix) <- NULL
+colours <- colorRampPalette(rev(brewer.pal(9,"Blues")) )(255)
+
+HTseq_heatmap <- pheatmap(HTSeq_distmatrix,clustering_distance_rows = HTSeq_Distance,clustering_distance_cols = HTSeq_Distance, col=colours,main = "Sample distance matrix",fontface= "bold",fontsize = 13,border_color = FALSE)
+```
+---
+##
+<h2>PCA plot</h2>
+---
+```{r PCA plot, echo=TRUE, message=FALSE}
+# PCA plot analysis
+HTSeq_PCA <- plotPCA(Rlog_HTSeq, intgroup= c("condition","gender"), returnData=TRUE)
+percentVar <- round(100 * attr(HTSeq_PCA, "percentVar"))
+
+# PCA plot by ggplot2
+ggplot(HTSeq_PCA, aes(PC1,PC2,color=condition, shape=gender))+
+  geom_point(size=3)+
+  xlab(paste0("PC1: ",percentVar[1],"% variance"))+
+  ylab(paste0("PC2: ",percentVar[2],"% variance"))+
+  coord_fixed() +
+  geom_text_repel(aes(label=paste(HTSeq_PCA$name, sep = '-')),size=4)+
+  scale_x_continuous(limits = c(-25,+60))+
+  scale_y_continuous(limits = c(-35,+20))+
+  theme_classic()+
+  ggtitle(label = 'PCA plot of gender vs condition')+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+---
+##
+<h2>Heatmap</h2>
+---
+```{r heatmap, echo=TRUE, fig.height=17, fig.width=10, message=FALSE}
+# heatmap count matrix.
+res <- res[order(res$padj),]
+res <- subset(res, res$padj < 0.05)
+selected <- rownames(res)
+sig <- subset(Rlog_HTSeq, rownames(Rlog_HTSeq) %in% selected)
+
+# plotting heatmap
+log2.norm.count <- assay(Rlog_HTSeq)[selected,]
+log2.norm.count <- log2.norm.count - rowMeans(log2.norm.count)
+rownames(log2.norm.count) <- paste(rownames(log2.norm.count),
+      geneBiotype$description[match(rownames(log2.norm.count),
+                   geneBiotype$ensembl_gene_id)], sep = " - ")
+df <- as.data.frame(colData(Rlog_HTSeq)[,c("condition", "gender")])
+
+pheatmap(log2.norm.count,cluster_rows = TRUE, clustering_distance_rows = 'euclidean', 
+         show_rownames = TRUE,cluster_cols = FALSE, cellwidth = 10, 
+         cellheight = 10, annotation_col = df, fontsize_row = 8,fontsize_col = 8 ,main = "Heatmap of expressed genes",fontface= "bold",fontsize = 13,border_color = FALSE)
+```
+---
+##
+<h2>differential expression</h2>
+---
+```{r Volcanoplot, echo=TRUE}
+# volcanoplot
+ENR_bio <- subset(geneBiotype, geneBiotype$ensembl_gene_id %in% selected, select = c('ensembl_gene_id','hgnc_symbol'))
+
+new <- as.data.frame(subset(res, select = c(log2FoldChange, pvalue)))
+# merge data
+new$HGNC <- ENR_bio$hgnc_symbol[match(rownames(new), ENR_bio$ensembl_gene_id)]
+lb <- c("TTTY14","TTTY15","XIST","LINC00265","LINC00310","TSIX","MIR155HG","LINC00302","C20orf197","FAM30A")
+
+ ggplot(data = new, aes(x = log2FoldChange ,y = -log10(pvalue)))+ 
+  geom_point(data = new,size=2, color = ifelse(new$HGNC %in% lb, "red", "black"))+
+  theme_gray()+
+  geom_label_repel(inherit.aes = TRUE,fill='blue',segment.color = 'Blue',label = ifelse(new$HGNC %in% lb,new$HGNC, ''),color = ifelse(new$HGNC %in% lb, "white", "black")) +
+  ggtitle("Gene expression change Log2")+
+  theme(title = element_text(size = 12,face = "bold",hjust = 0.5),
+        axis.title.x = element_text(size = 10),axis.title.y = element_text(size = 10))+
+  ylab("-log10 (pvalue)")+
+   xlab("log2FoldChange")
+
+```
+---
+##
+<h2>Pathway analysis by enrichr</h2>
+---
+```{r enrichr, echo=TRUE, message=FALSE, warning=FALSE,results=FALSE}
+# pathway analysis through enrichr
+ENR_bio <- subset(geneBiotype, geneBiotype$ensembl_gene_id %in% selected, select = c('ensembl_gene_id','hgnc_symbol'))
+
+for_enrichr <- subset(ENR_bio$hgnc_symbol,  ENR_bio$hgnc_symbol != "")
+
+dbs <- listEnrichrDbs()$libraryName
+
+enriched_genes <- enrichr(for_enrichr, dbs)
+
+rich <- subset(enriched_genes, lapply(enriched_genes, function(x) nrow(x)) > 0 )
+```
+---
+##
+<h2>Eriched genes pathway</h2>
+---
+```{r gene enrichment, echo=TRUE, message=FALSE, warning=FALSE,results=FALSE}
+#pathway analysis of associated genes
+they_affect <- lapply(rich$TRANSFAC_and_JASPAR_PWMs$Term, function(x) gsub(" \\(.*", "", x))
+c <- enrichr(they_affect, dbs)
+
+they_affect_2 <- lapply(rich$Human_Gene_Atlas$Term, function(x) gsub("_.*","", x))
+c2 <- enrichr(they_affect_2, dbs)
+
+they_affect_3 <- lapply(rich$ENCODE_Histone_Modifications_2015$Term, function(x) gsub("_.*","", x))
+c3 <- enrichr(they_affect_3, dbs)
+
+they_affect_5 <- lapply(rich$LINCS_L1000_Ligand_Perturbations_up$Term, function(x) gsub("-.*","",x))
+c5 <- enrichr(they_affect_5, dbs)
+
+
+```
+---
+##
+<h2>Final Results Table</h2>
+---
+```{r}
+# Final Results Table 
+Result_tab <- as.data.frame(res[,c('log2FoldChange','pvalue','padj')])
+Result_tab$description <- geneBiotype_sub$description[match(rownames(Result_tab),geneBiotype_sub$ensembl_gene_id)]
+Result_tab$hgnc <- geneBiotype_sub$hgnc_symbol[match(rownames(Result_tab),geneBiotype_sub$ensembl_gene_id)]
+Result_tab$chromosome_name <- geneBiotype_sub$chromosome_name[match(rownames(Result_tab),geneBiotype_sub$ensembl_gene_id)]
+Results <- subset(Result_tab,rownames(Result_tab) %in% c("ENSG00000176659","ENSG00000188185","ENSG00000234883","ENSG00000226777","ENSG00000176075","ENSG00000227456","ENSG00000270641","ENSG00000229807","ENSG00000176728","ENSG00000233864"))
+kable(Results,format = 'markdown',align = 'l', row.names = NA)
+
+```
+---
+##
+<h2>References</h2>
+---
+```{r references, echo=TRUE, warning=FALSE}
+
+citation("DESeq2")
+
+citation("biomaRt") 
+
+citation("pheatmap")
+
+citation("ggplot2")
+
+citation("enrichR")
